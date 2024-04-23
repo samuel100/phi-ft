@@ -53,17 +53,20 @@ def get_io_config(model):
     input_names = [
         "input_ids",
         "attention_mask",
-        *list(chain.from_iterable((f"past_key_{i}", f"past_value_{i}") for i in range(config.num_hidden_layers))),
+        "position_ids",
+        *list(
+            chain.from_iterable(
+                (f"past_key_values.{i}.key", f"past_key_values.{i}.value") for i in range(config.num_hidden_layers)
+            )
+        ),
     ]
     output_names = [
         "logits",
-        *list(chain.from_iterable((f"present_key_{i}", f"present_value_{i}") for i in range(config.num_hidden_layers))),
+        *list(chain.from_iterable((f"present.{i}.key", f"present.{i}.value") for i in range(config.num_hidden_layers))),
     ]
-    input_types = ["int32", "int32"] + ["float32", "float32"] * config.num_hidden_layers
     dynamic_axes = get_merged_model_dynamic_axes(input_names, output_names)
     return {
         "input_names": input_names,
-        "input_types": input_types,
         "output_names": output_names,
         "dynamic_axes": dynamic_axes,
     }
@@ -157,6 +160,7 @@ def get_merged_model_dynamic_axes(input_names: List[str], output_names: List[str
 
 # Inputs for all passes with past_key_values
 #   input_ids: (batch_size, sequence_length)
+#   postion_ids: (batch_size, sequence_length)
 #   attention_mask: (batch_size, past_sequence_length + sequence_length)
 #   past_kv: (batch_size, max_sequence_length, 2, num_heads, head_size)
 def get_merged_sample_with_past_kv_inputs(
@@ -172,18 +176,18 @@ def get_merged_sample_with_past_kv_inputs(
     return_dict: bool = False,
     world_size: int = 1,
 ):
-    input_ids = torch.randint(low=0, high=config.vocab_size, size=(batch_size, seq_len), dtype=torch.int32)
-    attention_mask = torch.ones(batch_size, past_seq_len + seq_len, dtype=torch.int32)
+    input_ids = torch.randint(low=0, high=config.vocab_size, size=(batch_size, seq_len), dtype=torch.int64)
+    attention_mask = torch.ones(batch_size, past_seq_len + seq_len, dtype=torch.int64)
     # position_ids is of shape (batch_size, seq_len) for prompt generation, (batch_size, 1) for token generation
     position_ids = get_position_ids(attention_mask, past_seq_len)
-    #step = torch.tensor(0, dtype=torch.int64)
+    # step = torch.tensor(0, dtype=torch.int64)
     past_kv = get_past_kv_inputs(config, batch_size, past_seq_len, use_fp16, world_size=world_size)
 
     # Convert inputs to NumPy (for ORT) or send to device (for PyTorch)
     input_ids = input_ids.numpy() if engine == "ort" else input_ids.to(device)
     attention_mask = attention_mask.numpy() if engine == "ort" else attention_mask.to(device)
     position_ids = position_ids.numpy() if engine == "ort" else position_ids.to(device)
-    step = step.numpy() if engine == "ort" else step.to(device)
+    # step = step.numpy() if engine == "ort" else step.to(device)
 
     # ruff: noqa: C417
     past_kv = (
@@ -205,8 +209,8 @@ def get_merged_sample_with_past_kv_inputs(
     if engine == "ort":
         assert isinstance(past_kv, dict)
         inputs.update(past_kv)
-        #del inputs["position_ids"]
-        #inputs["step"] = step
+        # del inputs["position_ids"]
+        # inputs["step"] = step
 
         if use_gqa:
             inputs = enable_past_present_share_buffer(inputs, past_seq_len, max_seq_len)
@@ -223,8 +227,8 @@ def flatten_past_kv_inputs(past_key_values: List[Tuple[torch.Tensor, torch.Tenso
     past_kv = {}
     # Convert list of past_kv to dict of past_key and past_value
     for i, (past_k, past_v) in enumerate(past_key_values):
-        past_kv[f"past_key_{i}"] = past_k
-        past_kv[f"past_value_{i}"] = past_v
+        past_kv[f"past_key_values.{i}.key"] = past_k
+        past_kv[f"past_key_values.{i}.value"] = past_v
     return past_kv
 
 
